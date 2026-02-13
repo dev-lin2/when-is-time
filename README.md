@@ -47,7 +47,3 @@ pnpm preview
 - `pnpm lint` - lint source files
 - `pnpm typecheck` - TypeScript check
 
-## Repository
-
-https://github.com/dev-lin2/when-is-time
-
