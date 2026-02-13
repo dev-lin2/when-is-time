@@ -3,11 +3,38 @@ import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useCountdown } from "@/hooks/useCountdown";
 import { useCurrentTime } from "@/hooks/useCurrentTime";
-import { formatInTimezone, toUtcFromTimezone } from "@/hooks/useTimezone";
-import { POPULAR_TIMEZONES, getTimezoneLabel } from "@/lib/timezones";
+import { formatInTimezone } from "@/hooks/useTimezone";
+import { getTimezoneLabel } from "@/lib/timezones";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+
+interface CalculatedState {
+  reference: string;
+  offsetSlot: string;
+  timeValue: string;
+}
+
+const REFERENCE_OPTIONS = [
+  { value: "UTC", label: "UTC" },
+  { value: "GMT", label: "GMT" },
+  { value: "UT", label: "UT" },
+];
+
+function buildOffsetOptions(): Array<{ value: string; label: string }> {
+  const options: Array<{ value: string; label: string }> = [];
+  for (let minutes = -12 * 60; minutes <= 14 * 60; minutes += 15) {
+    const sign = minutes < 0 ? "-" : "+";
+    const absolute = Math.abs(minutes);
+    const hours = Math.floor(absolute / 60);
+    const remainder = absolute % 60;
+    const slot = `${sign}${String(hours).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+    options.push({ value: slot, label: slot });
+  }
+  return options;
+}
+
+const OFFSET_OPTIONS = buildOffsetOptions();
 
 function getLocalTimezone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -17,34 +44,69 @@ function normalizeTime(value: string): string {
   return /^\d{2}:\d{2}$/.test(value) ? value : "00:00";
 }
 
+function parseOffsetToMinutes(offsetSlot: string): number {
+  const match = offsetSlot.match(/^([+-])(\d{2}):(\d{2})$/);
+  if (!match) return 0;
+
+  const sign = match[1] === "-" ? -1 : 1;
+  const hours = Number(match[2]);
+  const minutes = Number(match[3]);
+  return sign * (hours * 60 + minutes);
+}
+
+function toUtcFromOffsetTime(now: Date, timeValue: string, offsetMinutes: number): Date {
+  const [hoursPart, minutesPart] = timeValue.split(":");
+  const hours = Number(hoursPart);
+  const minutes = Number(minutesPart);
+
+  const zoneNow = new Date(now.getTime() + offsetMinutes * 60_000);
+  const year = zoneNow.getUTCFullYear();
+  const month = zoneNow.getUTCMonth();
+  const day = zoneNow.getUTCDate();
+
+  const utcTimestamp = Date.UTC(year, month, day, hours, minutes, 0, 0) - offsetMinutes * 60_000;
+  return new Date(utcTimestamp);
+}
+
 export function WhenTimeIsWidget() {
   const localTimezone = useMemo(() => getLocalTimezone(), []);
-  const [timezoneInput, setTimezoneInput] = useState<string>("UTC");
+  const [referenceInput, setReferenceInput] = useState<string>("UTC");
+  const [offsetSlotInput, setOffsetSlotInput] = useState<string>("+00:00");
   const [timeValueInput, setTimeValueInput] = useState<string>("09:00");
-  const [calculated, setCalculated] = useState<{ timezone: string; timeValue: string } | null>(null);
+  const [calculated, setCalculated] = useState<CalculatedState | null>(null);
   const now = useCurrentTime(1000);
 
-  const activeTimezone = calculated?.timezone ?? timezoneInput;
+  const activeReference = calculated?.reference ?? referenceInput;
+  const activeOffsetSlot = calculated?.offsetSlot ?? offsetSlotInput;
   const activeTimeValue = calculated?.timeValue ?? timeValueInput;
-  const targetDateInZone = useMemo(
-    () => formatInTimezone(now, activeTimezone, "yyyy-MM-dd"),
-    [activeTimezone, now],
-  );
   const normalizedTime = normalizeTime(activeTimeValue);
+  const activeOffsetMinutes = useMemo(
+    () => parseOffsetToMinutes(activeOffsetSlot),
+    [activeOffsetSlot],
+  );
 
   const targetMoment = useMemo(
-    () => toUtcFromTimezone(targetDateInZone, normalizedTime, activeTimezone),
-    [activeTimezone, normalizedTime, targetDateInZone],
+    () => toUtcFromOffsetTime(now, normalizedTime, activeOffsetMinutes),
+    [activeOffsetMinutes, normalizedTime, now],
   );
+
   const countdown = useCountdown(targetMoment);
   const hasResult = calculated !== null;
 
   const localMomentLabel = formatInTimezone(targetMoment, localTimezone, "EEE, MMM d - HH:mm");
-  const zoneMomentLabel = formatInTimezone(targetMoment, activeTimezone, "EEE, MMM d - HH:mm");
+  const zoneMomentLabel = useMemo(() => {
+    const shiftedDate = new Date(targetMoment.getTime() + activeOffsetMinutes * 60_000);
+    return formatInTimezone(shiftedDate, "UTC", "EEE, MMM d - HH:mm");
+  }, [activeOffsetMinutes, targetMoment]);
+
   const relativeLabel = countdown.isNow
-    ? "happens right now"
-    : `${countdown.formatted} away`;
+    ? "is right now"
+    : countdown.isPast
+      ? `was ${countdown.formatted} ago`
+      : `will be in ${countdown.formatted}`;
+
   const canCalculate = /^\d{2}:\d{2}$/.test(timeValueInput);
+  const referenceWithOffset = `${activeReference} ${activeOffsetSlot}`;
 
   return (
     <section
@@ -56,11 +118,11 @@ export function WhenTimeIsWidget() {
           When Time Is
         </h2>
         <p className="text-sm text-muted-foreground">
-          Enter a time and timezone identifier to compare it against your local timezone.
+          Choose a reference and offset slot, then compare that time against your local timezone.
         </p>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-[180px,1fr]">
+      <div className="grid gap-3 md:grid-cols-[170px,1fr,1fr]">
         <label className="grid gap-1 text-sm">
           <span className="font-medium">Time value</span>
           <Input
@@ -75,17 +137,32 @@ export function WhenTimeIsWidget() {
         </label>
 
         <div className="grid gap-1 text-sm">
-          <span className="font-medium">Timezone</span>
+          <span className="font-medium">Reference</span>
           <SearchableSelect
-            id="when-time-is-timezone"
-            value={timezoneInput}
-            options={POPULAR_TIMEZONES}
+            id="when-time-is-reference"
+            value={referenceInput}
+            options={REFERENCE_OPTIONS}
             onChange={(nextValue) => {
-              setTimezoneInput(nextValue);
+              setReferenceInput(nextValue);
               setCalculated(null);
             }}
-            placeholder="Select timezone"
-            searchPlaceholder="Search timezone identifier..."
+            placeholder="Select reference"
+            searchPlaceholder="Search reference..."
+          />
+        </div>
+
+        <div className="grid gap-1 text-sm">
+          <span className="font-medium">Offset slot</span>
+          <SearchableSelect
+            id="when-time-is-offset-slot"
+            value={offsetSlotInput}
+            options={OFFSET_OPTIONS}
+            onChange={(nextValue) => {
+              setOffsetSlotInput(nextValue);
+              setCalculated(null);
+            }}
+            placeholder="Select offset slot"
+            searchPlaceholder="Search offset (e.g. +07:30)..."
           />
         </div>
       </div>
@@ -94,7 +171,8 @@ export function WhenTimeIsWidget() {
         <Button
           onClick={() =>
             setCalculated({
-              timezone: timezoneInput,
+              reference: referenceInput,
+              offsetSlot: offsetSlotInput,
               timeValue: normalizeTime(timeValueInput),
             })
           }
@@ -112,9 +190,7 @@ export function WhenTimeIsWidget() {
         <>
           <div className="grid gap-3 md:grid-cols-2">
             <div className="rounded-xl border border-border/70 bg-background/70 p-4">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                {getTimezoneLabel(activeTimezone)}
-              </p>
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">{referenceWithOffset}</p>
               <p className="mt-2 font-mono text-2xl font-semibold tabular-nums">{normalizedTime}</p>
               <p className="mt-1 text-sm text-muted-foreground">{zoneMomentLabel}</p>
             </div>
@@ -150,8 +226,8 @@ export function WhenTimeIsWidget() {
                 <Hourglass className="h-4 w-4" />
               )}
               <span>
-                When time is {normalizedTime} in {getTimezoneLabel(activeTimezone)}, it is {relativeLabel} from your
-                timezone current time.
+                When time is {normalizedTime} in {referenceWithOffset}, it {relativeLabel} compared to your local
+                timezone.
               </span>
             </div>
             <p className="mt-2 font-mono text-3xl font-bold tabular-nums">{countdown.formatted}</p>
