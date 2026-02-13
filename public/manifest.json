@@ -1,0 +1,10 @@
+{
+  "name": "When Time Is?",
+  "short_name": "When Time Is?",
+  "description": "Compare world times and run live countdowns.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1726",
+  "theme_color": "#0b1726",
+  "icons": []
+}
